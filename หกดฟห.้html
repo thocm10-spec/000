@@ -1,0 +1,983 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <title>SecureChat — MQTT Group Chat & Video Call</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>💬</text></svg>" />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Thai:wght@400;500;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet" />
+  <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+  <style>
+    /* ─── Design Tokens ─────────────────────────────────────── */
+    :root {
+      --c-bg:       #0d0f12;
+      --c-surface:  #161a21;
+      --c-surface2: #1e242e;
+      --c-border:   #2a3040;
+      --c-accent:   #3b82f6;
+      --c-accent2:  #22d3ee;
+      --c-green:    #22c55e;
+      --c-red:      #ef4444;
+      --c-text:     #f3f4f6;
+      --c-muted:    #9ca3af;
+      
+      --font-sans: 'IBM Plex Sans Thai', sans-serif;
+      --font-mono: 'JetBrains Mono', monospace;
+      --radius:    12px;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    
+    body {
+      font-family: var(--font-sans);
+      background-color: var(--c-bg);
+      color: var(--c-text);
+      width: 100vw;
+      height: 100dvh;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+    }
+
+    /* ─── Views Manager ─────────────────────────────────────── */
+    .view { display: none; width: 100%; height: 100%; flex-direction: column; }
+    .view.active { display: flex; }
+
+    /* ─── Login View ────────────────────────────────────────── */
+    #loginView { justify-content: center; align-items: center; padding: 20px; }
+    .login-card {
+      background: var(--c-surface);
+      border: 1px solid var(--c-border);
+      border-radius: var(--radius);
+      padding: 32px;
+      width: 100%;
+      max-width: 420px;
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+      box-shadow: 0 20px 25px -5px rgba(0,0,0,0.5);
+    }
+    .brand { text-align: center; margin-bottom: 10px; }
+    .brand h1 { font-size: 1.8rem; font-weight: 700; color: var(--c-text); letter-spacing: -0.5px; }
+    .brand span { color: var(--c-accent2); font-family: var(--font-mono); font-size: 0.85rem; }
+
+    /* Avatar Upload */
+    .avatar-picker { display: flex; justify-content: center; margin-bottom: 5px; }
+    .avatar-wrapper {
+      width: 90px;
+      height: 90px;
+      background: var(--c-surface2);
+      border: 2px dashed var(--c-border);
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      overflow: hidden;
+      position: relative;
+      transition: all 0.2s;
+    }
+    .avatar-wrapper:hover { border-color: var(--c-accent); background: rgba(59,130,246,0.05); }
+    #avatarPlaceholder { font-size: 2rem; }
+    #avatarPreview { width: 100%; height: 100%; object-fit: cover; display: none; }
+    #userAvatarInput { display: none; }
+
+    /* Inputs & Buttons */
+    .field { display: flex; flex-direction: column; gap: 6px; }
+    .field label { font-size: 0.85rem; color: var(--c-muted); font-weight: 500; }
+    .input-ctrl {
+      background: var(--c-surface2);
+      border: 1px solid var(--c-border);
+      border-radius: 8px;
+      padding: 12px 14px;
+      color: var(--c-text);
+      font-size: 1rem;
+      font-family: inherit;
+      outline: none;
+      transition: border 0.2s;
+    }
+    .input-ctrl:focus { border-color: var(--c-accent); }
+    .input-ctrl::placeholder { color: rgba(156,163,175,0.4); }
+
+    .btn {
+      background: var(--c-accent);
+      color: white;
+      border: none;
+      border-radius: 8px;
+      padding: 14px;
+      font-size: 1rem;
+      font-weight: 700;
+      cursor: pointer;
+      transition: all 0.2s;
+      font-family: var(--font-sans);
+    }
+    .btn:hover:not(:disabled) { background: #2563eb; transform: translateY(-1px); }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    #connectionStatus {
+      font-family: var(--font-mono);
+      font-size: 0.8rem;
+      text-align: center;
+      padding: 6px;
+      border-radius: 6px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+    }
+    #connectionStatus .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+    .st-connecting { background: rgba(239,68,68,0.1); color: var(--c-red); }
+    .st-connecting .dot { background: var(--c-red); animation: pulse 1.5s infinite; }
+    .st-ready { background: rgba(34,197,94,0.1); color: var(--c-green); }
+    .st-ready .dot { background: var(--c-green); }
+
+    /* ─── Chat View ─────────────────────────────────────────── */
+    .chat-container { display: flex; flex-direction: column; width: 100%; height: 100%; }
+    
+    /* Header */
+    .chat-hdr {
+      background: var(--c-surface);
+      border-bottom: 1px solid var(--c-border);
+      padding: 14px 20px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      z-index: 10;
+    }
+    .room-meta h2 { font-size: 1.1rem; font-weight: 700; }
+    .room-meta p { font-size: 0.8rem; color: var(--c-muted); font-family: var(--font-mono); }
+    .hdr-actions { display: flex; gap: 8px; align-items: center; }
+    
+    .call-btn {
+      padding: 8px 14px;
+      border-radius: 6px;
+      border: none;
+      font-size: 0.85rem;
+      font-weight: 600;
+      cursor: pointer;
+      color: white;
+      font-family: var(--font-sans);
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .call-btn.v-audio { background-color: var(--c-green); }
+    .call-btn.v-video { background-color: #8b5cf6; }
+    .btn-leave { background: transparent; border: 1px solid var(--c-border); color: var(--c-muted); padding: 8px 14px; border-radius: 6px; font-size: 0.85rem; cursor: pointer; }
+    .btn-leave:hover { background: rgba(239,68,68,0.1); color: var(--c-red); border-color: var(--c-red); }
+
+    /* ─── โซนระบบคอลกลุ่ม (WebRTC Video Grid) ───────────────── */
+    #videoArea {
+      display: none;
+      background: #090b0d;
+      padding: 12px;
+      flex-direction: column;
+      gap: 12px;
+      border-bottom: 1px solid var(--c-border);
+      max-height: 40%;
+      overflow-y: auto;
+    }
+    .video-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+      gap: 10px;
+      width: 100%;
+    }
+    .video-wrapper {
+      position: relative;
+      background: var(--c-surface);
+      border: 1px solid var(--c-border);
+      border-radius: 8px;
+      overflow: hidden;
+      aspect-ratio: 4/3;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .video-wrapper video { width: 100%; height: 100%; object-fit: cover; }
+    .video-wrapper.local video { transform: scaleX(-1); }
+    .video-label {
+      position: absolute;
+      bottom: 6px;
+      left: 6px;
+      background: rgba(0,0,0,0.7);
+      color: var(--c-text);
+      padding: 2px 8px;
+      border-radius: 4px;
+      font-size: 0.75rem;
+      max-width: 90%;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      border: 1px solid rgba(255,255,255,0.1);
+      z-index: 2;
+    }
+    .audio-avatar { position: absolute; font-size: 2.5rem; z-index: 1; animation: float 3s ease-in-out infinite; }
+    
+    .controls-bar {
+      display: flex;
+      justify-content: center;
+      gap: 8px;
+      padding: 4px;
+      background: var(--c-surface2);
+      border-radius: 6px;
+      border: 1px solid var(--c-border);
+      align-self: center;
+    }
+    .control-btn {
+      padding: 6px 12px;
+      background: var(--c-surface);
+      border: 1px solid var(--c-border);
+      color: var(--c-text);
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 0.8rem;
+      font-family: var(--font-sans);
+    }
+    .control-btn.active { background: var(--c-border); color: var(--c-accent2); }
+    .control-btn.end { background: var(--c-red); color: white; border-color: var(--c-red); }
+
+    /* Chat Area */
+    .chat-box {
+      flex: 1;
+      padding: 20px;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+      background-image: radial-gradient(var(--c-border) 1px, transparent 0);
+      background-size: 24px 24px;
+    }
+
+    /* Message Bubble Styles */
+    .msg-row { display: flex; width: 100%; gap: 12px; align-items: flex-start; }
+    .msg-row.self { justify-content: flex-end; }
+    .msg-row.other { justify-content: flex-start; }
+
+    .msg-avatar { width: 36px; height: 36px; border-radius: 50%; object-fit: cover; border: 1px solid var(--c-border); flex-shrink: 0; }
+    .msg-row.self .msg-avatar { display: none; }
+
+    .msg-content-block { display: flex; flex-direction: column; max-width: 70%; gap: 4px; }
+    .msg-row.self .msg-content-block { align-items: flex-end; }
+
+    .msg-meta { font-family: var(--font-mono); font-size: 0.75rem; color: var(--c-muted); }
+    
+    .bubble {
+      padding: 10px 14px;
+      border-radius: 16px;
+      font-size: 0.95rem;
+      line-height: 1.45;
+      word-break: break-word;
+    }
+    .msg-row.self .bubble { background: var(--c-accent); color: white; border-bottom-right-radius: 4px; }
+    .msg-row.other .bubble { background: var(--c-surface); border: 1px solid var(--c-border); color: var(--c-text); border-bottom-left-radius: 4px; }
+    
+    .bubble img { max-width: 100%; border-radius: 8px; margin-top: 6px; display: block; cursor: pointer; border: 1px solid rgba(255,255,255,0.05); }
+
+    .sys-msg {
+      align-self: center;
+      font-family: var(--font-mono);
+      font-size: 0.75rem;
+      color: var(--c-accent2);
+      background: rgba(34,211,238,0.05);
+      border: 1px dashed rgba(34,211,238,0.2);
+      padding: 6px 16px;
+      border-radius: 20px;
+    }
+
+    /* Input Footer */
+    .chat-footer {
+      background: var(--c-surface);
+      border-top: 1px solid var(--c-border);
+      padding: 12px 20px max(12px, env(safe-area-inset-bottom));
+      display: flex;
+      gap: 10px;
+      align-items: center;
+    }
+    .foot-btn {
+      width: 42px;
+      height: 42px;
+      background: var(--c-surface2);
+      border: 1px solid var(--c-border);
+      border-radius: 50%;
+      color: var(--c-muted);
+      font-size: 1.2rem;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    .foot-btn:hover { color: var(--c-text); border-color: var(--c-muted); }
+    .foot-btn input { display: none; }
+
+    .input-wrapper { flex: 1; position: relative; }
+    .chat-input {
+      width: 100%;
+      background: var(--c-surface2);
+      border: 1px solid var(--c-border);
+      border-radius: 22px;
+      padding: 11px 18px;
+      color: var(--c-text);
+      font-size: 0.95rem;
+      outline: none;
+      font-family: inherit;
+    }
+    .chat-input:focus { border-color: var(--c-accent); }
+
+    .btn-send {
+      background: var(--c-accent);
+      color: white;
+      border: none;
+      border-radius: 20px;
+      padding: 10px 18px;
+      font-weight: 700;
+      font-size: 0.9rem;
+      cursor: pointer;
+    }
+    .btn-send:hover { background: #2563eb; }
+
+    /* ─── Toasts & Animations ───────────────────────────────── */
+    #toastContainer { position: fixed; top: 20px; right: 20px; z-index: 1000; display: flex; flex-direction: column; gap: 10px; }
+    .toast {
+      background: var(--c-surface);
+      border-left: 4px solid var(--c-accent);
+      color: var(--c-text);
+      padding: 12px 20px;
+      border-radius: 6px;
+      font-size: 0.9rem;
+      box-shadow: 0 10px 15px -3px rgba(0,0,0,0.3);
+      animation: slideIn 0.3s ease forwards;
+    }
+    .toast.error { border-left-color: var(--c-red); background: #1a1012; }
+
+    .secure-banner {
+      display: none;
+      margin-top: 4px;
+      padding: 10px 12px;
+      border-radius: 8px;
+      background: rgba(239, 68, 68, 0.08);
+      color: #fca5a5;
+      border: 1px solid rgba(239, 68, 68, 0.25);
+      font-size: 0.82rem;
+      line-height: 1.4;
+    }
+    .secure-banner.show { display: block; }
+
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+    @keyframes slideIn { from { transform: translateX(100%); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
+    @keyframes float { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-5px); } }
+  </style>
+</head>
+<body>
+
+  <div id="toastContainer"></div>
+
+  <div id="loginView" class="view active">
+    <div class="login-card">
+      <div class="brand">
+        <h1>SecureChat</h1>
+        <span>MQTT MESH NODE // v3.0</span>
+      </div>
+      
+      <div id="connectionStatus" class="st-connecting">
+        <span class="dot"></span>กำลังเชื่อมต่อโบรกเกอร์...
+      </div>
+
+      <div id="secureBanner" class="secure-banner">
+        แนะนำให้เปิดไฟล์นี้ผ่าน <b>HTTPS</b> หรือ <b>localhost</b> เท่านั้น เพื่อให้กล้อง/ไมค์ (getUserMedia) และ WebRTC ใช้งานได้บน GitHub Pages
+      </div>
+
+      <div class="avatar-picker">
+        <label for="userAvatarInput" class="avatar-wrapper" title="อัปโหลดรูปโปรไฟล์">
+          <span id="avatarPlaceholder">👤</span>
+          <img id="avatarPreview" alt="Avatar" />
+        </label>
+        <input type="file" id="userAvatarInput" accept="image/*" onchange="previewAvatar()" />
+      </div>
+
+      <div class="field">
+        <label>USERNAME</label>
+        <input type="text" id="usernameInput" class="input-ctrl" placeholder="ระบุชื่อผู้ใช้งาน" autocomplete="off" />
+      </div>
+
+      <div class="field">
+        <label>ROOM ID (TOPIC)</label>
+        <input type="text" id="groupInput" class="input-ctrl" placeholder="ชื่อกลุ่มหรือห้องแชท" autocomplete="off" />
+      </div>
+
+      <div class="field">
+        <label>ROOM PASSWORD</label>
+        <input type="password" id="passwordInput" class="input-ctrl" placeholder="รหัสผ่านห้อง" />
+      </div>
+
+      <button id="joinBtn" class="btn" onclick="requestJoin()" disabled>CONNECT TO ROOM</button>
+    </div>
+  </div>
+
+  <div id="chatView" class="view">
+    <div class="chat-hdr">
+      <div class="room-meta">
+        <h2 id="displayRoomName">ROOM: -</h2>
+        <p id="displayClientNode">NODE // UNKNOWN</p>
+      </div>
+      <div class="hdr-actions">
+        <button class="call-btn v-audio" onclick="startGroupCall('audio')">📞 โทรเสียง</button>
+        <button class="call-btn v-video" onclick="startGroupCall('video')">📹 วิดีโอคอล</button>
+        <button class="btn-leave" onclick="leaveGroup()">LEAVE</button>
+      </div>
+    </div>
+
+    <div id="videoArea">
+      <div class="video-grid" id="videoGrid">
+        <div class="video-wrapper local" id="localVideoWrapper" style="display: none;">
+          <video id="localVideo" autoplay playsinline muted></video>
+          <div class="audio-avatar" id="localAudioAvatar" style="display:none;">🗣️</div>
+          <div class="video-label">คุณ (Local)</div>
+        </div>
+      </div>
+      <div class="controls-bar">
+        <button class="control-btn" id="muteMicBtn" onclick="toggleMic()">🎤 ปิดไมค์</button>
+        <button class="control-btn" id="toggleCamBtn" onclick="toggleCam()">📷 ปิดกล้อง</button>
+        <button class="control-btn end" onclick="endGroupCall()">❌ วางสาย</button>
+      </div>
+    </div>
+
+    <div class="chat-box" id="chatBox"></div>
+
+    <div class="chat-footer">
+      <label class="foot-btn" title="ส่งรูปภาพ">
+        📷
+        <input type="file" id="imageInput" accept="image/*" onchange="sendImage()" />
+      </label>
+      <button class="foot-btn" onclick="sendSticker('👍')">👍</button>
+      <div class="input-wrapper">
+        <input type="text" id="messageInput" class="chat-input" placeholder="พิมพ์ข้อความที่ต้องการส่ง..." onkeypress="handleKeyPress(event)" />
+      </div>
+      <button class="btn-send" onclick="sendMessage()">SEND</button>
+    </div>
+  </div>
+
+  <script>
+    const isSecureContextOk = window.isSecureContext || location.hostname === 'localhost' || location.hostname === '127.0.0.1';
+    const brokerUrl = isSecureContextOk
+      ? 'wss://broker.emqx.io:8084/mqtt'
+      : 'wss://broker.emqx.io:8084/mqtt'; // ใช้ WSS เสมอเพื่อรองรับ GitHub Pages (HTTPS)
+
+    const clientId = 'node_' + Math.random().toString(16).substring(2, 10);
+    
+    let currentTopic = '';
+    let displayRoomName = '';
+    let myUsername = '';
+    let myAvatar = null;
+    
+    let isJoiningProcess = false;
+    let joinTimeout = null;
+    let isInsideRoom = false;
+
+    if (!isSecureContextOk) {
+      window.addEventListener('DOMContentLoaded', () => {
+        const banner = document.getElementById('secureBanner');
+        if (banner) banner.classList.add('show');
+      });
+    }
+
+    // --- ตัวแปรสำหรับระบบคอลกลุ่ม (WebRTC Mesh) ---
+    let localStream = null;
+    let peerConnections = {}; 
+    let callType = 'video'; 
+    let isMicMuted = false;
+    let isCamOff = false;
+    const rtcConfig = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
+
+    const client = mqtt.connect(brokerUrl, {
+      clientId: clientId,
+      clean: true,
+      connectTimeout: 4000,
+      reconnectPeriod: 1000,
+    });
+
+    client.on('connect', () => {
+      setStatus('เซิร์ฟเวอร์พร้อมใช้งาน', 'st-ready');
+      document.getElementById('joinBtn').disabled = false;
+    });
+
+    client.on('offline', () => {
+      setStatus('ขาดการเชื่อมต่อ กำลังลองใหม่...', 'st-connecting');
+      document.getElementById('joinBtn').disabled = true;
+    });
+
+    client.on('message', async (topic, payload) => {
+      if (topic !== currentTopic) return;
+      try {
+        const data = JSON.parse(payload.toString());
+        
+        // ระบบกรองและตรวจสอบชื่อซ้ำ
+        if (data.type === 'check_name') {
+          if (isInsideRoom && data.name === myUsername && data.senderId !== clientId) {
+            client.publish(currentTopic, JSON.stringify({ type: 'name_taken', name: myUsername }));
+          }
+        } else if (data.type === 'name_taken') {
+          if (isJoiningProcess && data.name === myUsername) {
+            cancelJoin("ชื่อซ้ำ! มีผู้ใช้งานชื่อนี้อยู่ในห้องแล้ว");
+          }
+        } 
+        
+        // ระบบดักจับสัญญาณคอลกลุ่ม (WebRTC Mesh Signaling)
+        else if (data.type?.startsWith('call_')) {
+          if (!localStream) return; // หากไม่ได้กดคอลอยู่ ให้มองข้ามสตรีมทั้งหมด
+          
+          switch (data.type) {
+            case 'call_join':
+              if (data.senderId !== clientId) {
+                await initiatePeerConnection(data.senderId, data.senderName, data.callMode);
+              }
+              break;
+            case 'call_offer':
+              if (data.target === clientId) {
+                await handleCallOffer(data.senderId, data.senderName, data.offer, data.callMode);
+              }
+              break;
+            case 'call_answer':
+              if (data.target === clientId && peerConnections[data.senderId]) {
+                await peerConnections[data.senderId].setRemoteDescription(new RTCSessionDescription(data.answer));
+              }
+              break;
+            case 'call_ice':
+              if (data.target === clientId && peerConnections[data.senderId]) {
+                try { await peerConnections[data.senderId].addIceCandidate(new RTCIceCandidate(data.candidate)); } catch(e){}
+              }
+              break;
+            case 'call_leave':
+              removePeerVideo(data.senderId);
+              break;
+          }
+        } 
+        
+        // แสดงข้อความในแชทปกติ
+        else if (isInsideRoom) {
+          displayMessage(data);
+        }
+      } catch (e) {
+        console.error("Payload parse error");
+      }
+    });
+
+    // ─── WebRTC Mesh Engine ──────────────────────────────────
+    async function startGroupCall(mode) {
+      if (!isSecureContextOk) {
+        toast("ต้องเปิดผ่าน HTTPS หรือ localhost ก่อนถึงจะใช้กล้อง/ไมค์และ WebRTC ได้", true);
+        return;
+      }
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        toast("เบราว์เซอร์บล็อกการเข้าถึงกล้อง/ไมค์", true);
+        return;
+      }
+
+      try {
+        callType = mode;
+        const constraints = {
+          audio: true,
+          video: mode === 'video' ? { width: 480, height: 360 } : false
+        };
+
+        localStream = await navigator.mediaDevices.getUserMedia(constraints);
+        
+        document.getElementById('videoArea').style.display = 'flex';
+        document.getElementById('localVideoWrapper').style.display = 'flex';
+        
+        const localVideo = document.getElementById('localVideo');
+        const localAvatar = document.getElementById('localAudioAvatar');
+        const toggleCamBtn = document.getElementById('toggleCamBtn');
+
+        if (mode === 'video') {
+          localVideo.srcObject = localStream;
+          localVideo.style.display = 'block';
+          localAvatar.style.display = 'none';
+          toggleCamBtn.style.display = 'block';
+          isCamOff = false;
+          toggleCamBtn.textContent = "📷 ปิดกล้อง";
+        } else {
+          localVideo.srcObject = null;
+          localVideo.style.display = 'none';
+          localAvatar.style.display = 'block';
+          toggleCamBtn.style.display = 'none';
+          isCamOff = true;
+        }
+
+        isMicMuted = false;
+        document.getElementById('muteMicBtn').textContent = "🎤 ปิดไมค์";
+
+        // ยิงกระแสกระจายสัญญาณหา Node อื่นๆ ในห้องแชท
+        client.publish(currentTopic, JSON.stringify({
+          type: 'call_join',
+          senderId: clientId,
+          senderName: myUsername,
+          callMode: mode
+        }));
+
+        toast(`เริ่มเข้าสู่การ${mode === 'video' ? 'วิดีโอคอล' : 'โทรคุยด้วยเสียง'}`);
+
+      } catch (err) {
+        toast("ไม่สามารถเปิดอุปกรณ์ได้: " + err.message, true);
+      }
+    }
+
+    async function initiatePeerConnection(peerId, peerName, remoteMode) {
+      const pc = new RTCPeerConnection(rtcConfig);
+      peerConnections[peerId] = pc;
+
+      localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
+
+      pc.onicecandidate = (event) => {
+        if (event.candidate) {
+          client.publish(currentTopic, JSON.stringify({ type: 'call_ice', senderId: clientId, target: peerId, candidate: event.candidate }));
+        }
+      };
+
+      pc.ontrack = (event) => { addPeerVideoElement(peerId, peerName, event.streams[0], remoteMode); };
+
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      client.publish(currentTopic, JSON.stringify({ type: 'call_offer', senderId: clientId, target: peerId, senderName: myUsername, offer: offer, callMode: callType }));
+    }
+
+    async function handleCallOffer(peerId, peerName, offer, remoteMode) {
+      const pc = new RTCPeerConnection(rtcConfig);
+      peerConnections[peerId] = pc;
+
+      localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
+
+      pc.onicecandidate = (event) => {
+        if (event.candidate) {
+          client.publish(currentTopic, JSON.stringify({ type: 'call_ice', senderId: clientId, target: peerId, candidate: event.candidate }));
+        }
+      };
+
+      pc.ontrack = (event) => { addPeerVideoElement(peerId, peerName, event.streams[0], remoteMode); };
+
+      await pc.setRemoteDescription(new RTCSessionDescription(offer));
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+      
+      client.publish(currentTopic, JSON.stringify({ type: 'call_answer', senderId: clientId, target: peerId, answer: answer }));
+    }
+
+    function addPeerVideoElement(peerId, peerName, stream, remoteMode) {
+      if (document.getElementById(`video-${peerId}`)) return;
+
+      const grid = document.getElementById('videoGrid');
+      const wrapper = document.createElement('div');
+      wrapper.className = 'video-wrapper';
+      wrapper.id = `video-${peerId}`;
+
+      const video = document.createElement('video');
+      video.srcObject = stream;
+      video.autoplay = true;
+      video.playsInline = true;
+
+      const avatar = document.createElement('div');
+      avatar.className = 'audio-avatar';
+      avatar.textContent = '👤';
+
+      if (remoteMode === 'video') {
+        video.style.display = 'block';
+        avatar.style.display = 'none';
+      } else {
+        video.style.display = 'none';
+        avatar.style.display = 'block';
+      }
+
+      const label = document.createElement('div');
+      label.className = 'video-label';
+      label.textContent = peerName + (remoteMode === 'audio' ? ' (Voice)' : '');
+
+      wrapper.appendChild(video);
+      wrapper.appendChild(avatar);
+      wrapper.appendChild(label);
+      grid.appendChild(wrapper);
+    }
+
+    function removePeerVideo(peerId) {
+      if (peerConnections[peerId]) {
+        peerConnections[peerId].close();
+        delete peerConnections[peerId];
+      }
+      const el = document.getElementById(`video-${peerId}`);
+      if (el) el.remove();
+    }
+
+    function toggleMic() {
+      if (!localStream) return;
+      isMicMuted = !isMicMuted;
+      localStream.getAudioTracks().forEach(track => track.enabled = !isMicMuted);
+      document.getElementById('muteMicBtn').textContent = isMicMuted ? "🎤 เปิดไมค์" : "🎤 ปิดไมค์";
+      document.getElementById('muteMicBtn').classList.toggle('active', isMicMuted);
+    }
+
+    function toggleCam() {
+      if (!localStream || callType === 'audio') return;
+      isCamOff = !isCamOff;
+      localStream.getVideoTracks().forEach(track => track.enabled = !isCamOff);
+      document.getElementById('localVideo').style.display = isCamOff ? 'none' : 'block';
+      document.getElementById('localAudioAvatar').style.display = isCamOff ? 'block' : 'none';
+      document.getElementById('toggleCamBtn').textContent = isCamOff ? "📷 เปิดกล้อง" : "📷 ปิดกล้อง";
+      document.getElementById('toggleCamBtn').classList.toggle('active', isCamOff);
+    }
+
+    function endGroupCall() {
+      if (localStream) {
+        client.publish(currentTopic, JSON.stringify({ type: 'call_leave', senderId: clientId }));
+        localStream.getTracks().forEach(track => track.stop());
+        localStream = null;
+      }
+
+      Object.keys(peerConnections).forEach(peerId => removePeerVideo(peerId));
+      
+      document.getElementById('videoArea').style.display = 'none';
+      document.getElementById('localVideoWrapper').style.display = 'none';
+      toast("วางสายสนทนาแล้ว");
+    }
+
+    // ─── UI / Helper Utilities ────────────────────────────────
+    function showView(id) {
+      document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+      document.getElementById(id).classList.add('active');
+    }
+
+    function setStatus(text, cls) {
+      const el = document.getElementById('connectionStatus');
+      el.innerHTML = `<span class="dot"></span>${text}`;
+      el.className = cls;
+    }
+
+    function toast(msg, isError = false) {
+      const c = document.getElementById('toastContainer');
+      const t = document.createElement('div');
+      t.className = 'toast' + (isError ? ' error' : '');
+      t.textContent = msg;
+      c.appendChild(t);
+      setTimeout(() => t.remove(), 3500);
+    }
+
+    function previewAvatar() {
+      const file = document.getElementById('userAvatarInput').files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        const img = new Image();
+        img.onload = () => {
+          const canvas = document.createElement('canvas');
+          const S = 80;
+          canvas.width = S; canvas.height = S;
+          const ctx = canvas.getContext('2d');
+          ctx.drawImage(img, 0, 0, S, S);
+          myAvatar = canvas.toDataURL('image/jpeg', 0.8);
+          document.getElementById('avatarPlaceholder').style.display = 'none';
+          const prev = document.getElementById('avatarPreview');
+          prev.src = myAvatar; prev.style.display = 'block';
+        };
+        img.src = e.target.result;
+      };
+      reader.readAsDataURL(file);
+    }
+
+    // ─── Chat & Joining Room System ──────────────────────────
+    function simpleHash(str) {
+      let hash = 0;
+      for (let i = 0; i < str.length; i++) {
+        hash = ((hash << 5) - hash) + str.charCodeAt(i);
+        hash |= 0;
+      }
+      return Math.abs(hash).toString(16);
+    }
+
+    function requestJoin() {
+      const name = document.getElementById('usernameInput').value.trim();
+      const rName = document.getElementById('groupInput').value.trim();
+      const pass = document.getElementById('passwordInput').value.trim();
+
+      if (!name || !rName || !pass) {
+        toast('กรุณากรอกข้อมูลให้ครบถ้วนทุกช่อง', true);
+        return;
+      }
+
+      myUsername = name;
+      displayRoomName = rName;
+      currentTopic = `sec_chat_mesh_${rName}_v3_${simpleHash(pass)}`;
+
+      const jBtn = document.getElementById('joinBtn');
+      jBtn.disabled = true;
+      jBtn.textContent = 'CHECKING NODE UNIQUE NAME...';
+      isJoiningProcess = true;
+
+      client.subscribe(currentTopic, (err) => {
+        if (!err) {
+          client.publish(currentTopic, JSON.stringify({ type: 'check_name', name: myUsername, senderId: clientId }));
+          joinTimeout = setTimeout(() => {
+            if (isJoiningProcess) confirmJoin();
+          }, 1200);
+        } else {
+          cancelJoin('การสมัครรับข้อมูลล้มเหลว');
+        }
+      });
+    }
+
+    function cancelJoin(reason) {
+      clearTimeout(joinTimeout);
+      isJoiningProcess = false;
+      client.unsubscribe(currentTopic);
+      currentTopic = '';
+      toast(reason, true);
+      const jBtn = document.getElementById('joinBtn');
+      jBtn.disabled = false;
+      jBtn.textContent = 'CONNECT TO ROOM';
+    }
+
+    function confirmJoin() {
+      isJoiningProcess = false;
+      isInsideRoom = true;
+      showView('chatView');
+      
+      document.getElementById('displayRoomName').textContent = `ROOM: ${displayRoomName}`;
+      document.getElementById('displayClientNode').textContent = `NODE // ${clientId.toUpperCase()}`;
+
+      client.publish(currentTopic, JSON.stringify({
+        type: 'system',
+        content: `Node [${myUsername}] has joined the mesh routing.`
+      }));
+    }
+
+    function leaveGroup() {
+      endGroupCall();
+      client.publish(currentTopic, JSON.stringify({
+        type: 'system',
+        content: `Node [${myUsername}] disconnected.`
+      }));
+      client.unsubscribe(currentTopic);
+      
+      isInsideRoom = false;
+      currentTopic = '';
+      document.getElementById('chatBox').innerHTML = '';
+      showView('loginView');
+      
+      const jBtn = document.getElementById('joinBtn');
+      jBtn.disabled = false;
+      jBtn.textContent = 'CONNECT TO ROOM';
+      toast("ออกจากกลุ่มแล้ว");
+    }
+
+    function sendMessage() {
+      const input = document.getElementById('messageInput');
+      const text = input.value.trim();
+      if (!text || !isInsideRoom) return;
+
+      client.publish(currentTopic, JSON.stringify({
+        senderId: clientId,
+        senderName: myUsername,
+        avatar: myAvatar,
+        type: 'text',
+        content: text,
+        time: new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})
+      }));
+      input.value = '';
+    }
+
+    function sendImage() {
+      const file = document.getElementById('imageInput').files[0];
+      if (!file || !isInsideRoom) return;
+
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        const img = new Image();
+        img.onload = () => {
+          const canvas = document.createElement('canvas');
+          let w = img.width, h = img.height;
+          const MAX = 600;
+          if (w > h && w > MAX) { h *= MAX/w; w = MAX; }
+          else if (h > w && h > MAX) { w *= MAX/h; h = MAX; }
+          
+          canvas.width = w; canvas.height = h;
+          const ctx = canvas.getContext('2d');
+          ctx.drawImage(img, 0, 0, w, h);
+          
+          client.publish(currentTopic, JSON.stringify({
+            senderId: clientId,
+            senderName: myUsername,
+            avatar: myAvatar,
+            type: 'image',
+            content: canvas.toDataURL('image/jpeg', 0.6),
+            time: new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})
+          }));
+          document.getElementById('imageInput').value = '';
+        };
+        img.src = e.target.result;
+      };
+      reader.readAsDataURL(file);
+    }
+
+    function sendSticker(emoji) {
+      if (!isInsideRoom) return;
+      client.publish(currentTopic, JSON.stringify({
+        senderId: clientId,
+        senderName: myUsername,
+        avatar: myAvatar,
+        type: 'text',
+        content: emoji,
+        time: new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})
+      }));
+    }
+
+    function handleKeyPress(e) { if (e.key === 'Enter') sendMessage(); }
+
+    function displayMessage(data) {
+      const chatBox = document.getElementById('chatBox');
+      const row = document.createElement('div');
+      const isSelf = data.senderId === clientId;
+
+      if (data.type === 'system') {
+        row.className = 'sys-msg';
+        row.textContent = data.content;
+      } else {
+        row.className = `msg-row ${isSelf ? 'self' : 'other'}`;
+        
+        // รูปโปรไฟล์ฝั่งคนอื่น
+        if (!isSelf) {
+          const img = document.createElement('img');
+          img.className = 'msg-avatar';
+          img.src = data.avatar || `https://api.dicebear.com/7.x/identicon/svg?seed=${data.senderName}`;
+          row.appendChild(img);
+        }
+
+        const block = document.createElement('div');
+        block.className = 'msg-content-block';
+
+        const meta = document.createElement('span');
+        meta.className = 'msg-meta';
+        meta.textContent = isSelf ? data.time : `${data.senderName} • ${data.time}`;
+        block.appendChild(meta);
+
+        const bubble = document.createElement('div');
+        bubble.className = 'bubble';
+
+        if (data.type === 'text') {
+          const txt = document.createElement('span');
+          txt.textContent = data.content;
+          bubble.appendChild(txt);
+        } else if (data.type === 'image') {
+          const img = document.createElement('img');
+          img.src = data.content;
+          img.onclick = () => window.open(data.content, '_blank');
+          bubble.appendChild(img);
+        }
+
+        block.appendChild(bubble);
+        row.appendChild(block);
+      }
+
+      chatBox.appendChild(row);
+      setTimeout(() => chatBox.scrollTop = chatBox.scrollHeight, 30);
+    }
+  </script>
+</body>
+</html>
